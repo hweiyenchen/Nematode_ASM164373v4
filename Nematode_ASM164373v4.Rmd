@@ -1,0 +1,1715 @@
+---
+be---
+title: "Nematode_ASM164373v4"
+output: html_document
+date: "`r Sys.Date()`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Load libraries
+
+Load libraries needed for the analyses.
+
+```{r}
+#library(googlesheets4)
+#library(httpuv)
+#gs4_deauth()
+#gs4_user()
+
+library(dplyr)
+library(tidyr)
+
+library(ggplot2)
+library(gridExtra)
+
+library(wesanderson)
+
+library(lme4)
+library(car)
+
+```
+
+# Settings
+
+Define variables for the analyses.
+
+**Palette**: colors for figures.\
+**se**: function for standard errors.\
+**percent**: format numbers as percentage.
+
+```{r}
+Palette <- wes_palette("FantasticFox1", 3, type = c("discrete"))
+
+se <- function(x) sqrt(var(x) / length(x))
+
+percent <- function(x, digits = 2, format = "f", ...) {
+  paste0(formatC(100 * x, format = format, digits = digits, ...), "%")
+}
+```
+
+# Load data: line survival
+
+```{r}
+line_survival <- read.csv(file = "~/My Drive/Nematode/Nematode_ASM164373v4_data/ANALYSES/extinction_all.csv")
+line_survival$Regime <- as.factor(line_survival$Regime)
+
+str(line_survival)
+```
+
+# Load data: coverage
+
+**coverage**: table containing mean coverage for each sample.
+
+```{r}
+coverage <- read.table(file = "~/My Drive/Nematode/Nematode_ASM164373v4_data/ANALYSES/DP_range")[,c(1,2,4)]
+
+colnames(coverage) <- c("Regime", "Sample", "coverage")
+coverage$coverage <- round(coverage$coverage, digits = 2)
+
+mean(coverage$coverage)
+
+aggregate(coverage$coverage, by = list(coverage$Regime), FUN = mean)
+
+```
+
+# Load data: callability
+
+**callability**: table containing the size of callable regions for each sample.
+
+```{r}
+
+callability <- read.table(file = "~/My Drive/Nematode/Nematode_ASM164373v4_data/ANALYSES/callability.txt", header = T)
+
+callability$Callability <- as.integer(callability$Callability) 
+callability$Sample <- as.factor(callability$Sample) 
+
+str(callability)
+```
+
+# Load data: manually curated singletons
+
+**singleton_raw**: table containing information for manually curated singletons; each row is occupied by one singleton.
+
+meaning of each column:\
+Regime: treatment;\
+Sample: sample ID, or MA-line ID;\
+chromosome: the scaffold in which the singleton is found;\
+position: the position in the scaffold where the singleton is found;\
+reference_allele: the reference allele in this scaffold_position;\
+alternate_allele: the alternate_allele in this scaffold_position;\
+approach: the variant discovery approach by which the singleton is found;\
+screenshot_id: the id of the screenshot for this singleton;\
+filter: whether the singleton passes (PASS) or fails (FAIL) manual inspection;\
+filter_description: reasons for failing the singleton (for singletons that passes, the value is PASS).
+
+```{r}
+singleton_raw <- read.table(file = "~/My Drive/Nematode/Nematode_ASM164373v4_data/Manual_inspection/ANALYSES/singleton_raw")
+
+colnames(singleton_raw) <- c("Regime", "Sample", "chromosome", "position",
+                             "reference_allele", "alternate_allele",
+                             "approach", "screenshot_id",
+                             "filter", "filter_description")
+
+singleton_raw$Regime <- as.factor(singleton_raw$Regime)
+singleton_raw$Sample <- as.factor(singleton_raw$Sample)
+singleton_raw$chromosome <- as.factor(singleton_raw$chromosome)
+singleton_raw$position <- as.factor(singleton_raw$position)
+singleton_raw$reference_allele <- as.factor(singleton_raw$reference_allele)
+singleton_raw$alternate_allele <- as.factor(singleton_raw$alternate_allele)
+singleton_raw$approach <- as.factor(singleton_raw$approach)
+singleton_raw$screenshot_id <- as.factor(singleton_raw$screenshot_id)
+singleton_raw$filter <- as.factor(singleton_raw$filter)
+singleton_raw$filter_description <- as.factor(singleton_raw$filter_description)
+
+singleton_raw$singleton_ID <- as.factor(paste(singleton_raw$chromosome,singleton_raw$position, sep = "_"))
+
+str(singleton_raw)
+```
+
+# Mutation rate: generate data frames
+
+From **singleton_raw**, subset to generate the following three data frames:\
+singleton_PASS,\
+singleton_PASS_consensus,\
+singleton_PASS_probabilistic.
+
+**singleton_PASS** contains the number of singletons that pass manual inspection for each approach for each sample.
+
+**singleton_PASS_consensus** contains the number of singletons discovered by the consensus approach and pass manual inspection for each sample.
+
+**singleton_PASS_probabilistic** contains the number of singletons discovered by the probabilistic approach and pass manual inspection for each sample.
+
+```{r}
+
+singleton_PASS <- singleton_raw[which(singleton_raw$filter == "PASS"),] %>% group_by(Regime, Sample, approach) %>% summarise(total_count=n(),.groups = 'drop') %>% as.data.frame()
+
+singleton_PASS_consensus <- singleton_PASS[which(singleton_PASS$approach == "consensus"),c(1,2,4)]
+colnames(singleton_PASS_consensus) <- c("Regime", "Sample", "consensus")
+
+singleton_PASS_probabilistic <- singleton_PASS[which(singleton_PASS$approach == "probabilistic"),c(1,2,4)]
+colnames(singleton_PASS_probabilistic) <- c("Regime", "Sample", "probabilistic")
+
+```
+
+From **singleton_raw**, subset to generate **singleton_PASS_overlap**, which contains the number of singletons discovered by both approaches and pass manual inspection for each sample.
+
+```{r}
+singleton_PASS_overlap <- subset(singleton_raw, duplicated(singleton_raw$singleton_ID) & singleton_raw$filter == "PASS") %>% group_by(Regime, Sample) %>% summarise(total_count=n(),.groups = 'drop') %>%  as.data.frame()
+
+colnames(singleton_PASS_overlap) <- c("Regime", "Sample", "overlap")
+
+```
+
+# Mutation rate: merge data frames
+
+**df**: working data frame that merges callability, singleton_PASS_consensus, singleton_PASS_probabilistic, singleton_PASS_overlap.
+
+```{r}
+
+df <- merge(singleton_PASS_probabilistic, merge(singleton_PASS_consensus,merge(singleton_PASS_overlap, callability, by = "Sample", all = T), by = "Sample", all = T), by = "Sample", all = T)[,c(1,2,3,5,7,8)]
+
+df[is.na(df)] <- 0
+```
+
+# Mutation rate: calculate
+
+derive mutation rate for the two approaches and for overlapping mutations.
+
+```{r}
+
+df$mu_probabilistic <- (df$probabilistic/df$Callability)/3
+df$mu_consensus <- (df$consensus/df$Callability)/3
+df$mu_overlap <- (df$overlap/df$Callability)/3
+
+str(df)
+
+
+```
+
+# Mutation rate: descriptions
+
+overlapping
+
+```{r}
+min(df$mu_overlap)
+max(df$mu_overlap)
+
+cbind(aggregate(df$mu_overlap, by = list(df$Regime), FUN = mean),aggregate(df$mu_overlap, by = list(df$Regime), FUN = se)[,2])
+
+```
+
+consensus
+
+```{r}
+min(df$mu_consensus)
+max(df$mu_consensus)
+
+cbind(aggregate(df$mu_consensus, by = list(df$Regime), FUN = mean),aggregate(df$mu_consensus, by = list(df$Regime), FUN = se)[,2])
+
+```
+
+probabilistic
+
+```{r}
+min(df$mu_probabilistic)
+max(df$mu_probabilistic)
+
+cbind(aggregate(df$mu_probabilistic, by = list(df$Regime), FUN = mean),aggregate(df$mu_probabilistic, by = list(df$Regime), FUN = se)[,2])
+
+```
+
+# Mutation rate: glm
+
+m1: Sasani et al., 2019; m2, m3, m4: our models.
+
+Report results produced by m2 and m4 (m2: absolute numbers of mutations; m4: relative number of mutations).
+
+```{r}
+
+m1 <- anova(glm(df$overlap ~ df$Regime, family = poisson(link = 'identity')), test = 'Chisq')
+
+m2 <- Anova(glmer(df$overlap ~ df$Regime + (1 | df$Regime), weights = df$Callability, family = poisson))
+
+m3 <- anova(glm(cbind(df$overlap, df$Callability - df$overlap) ~ df$Regime, family = binomial(link = 'logit')), test = 'Chisq')
+
+m4 <- Anova(glmer(cbind(df$overlap, df$Callability - df$overlap) ~ df$Regime + (1 | df$Regime), family = binomial))
+
+#print(m1)
+print(m2)
+#print(m3)
+print(m4)
+```
+
+```{r}
+
+m1_consensus <- anova(glm(df$consensus ~ df$Regime, family = poisson(link = 'identity')), test = 'Chisq')
+
+m2_consensus <- Anova(glmer(df$consensus ~ df$Regime + (1 | df$Regime), family = poisson))
+
+m3_consensus <- anova(glm(cbind(df$consensus, df$Callability - df$consensus) ~ df$Regime, family = binomial(link = 'logit')), test = 'Chisq')
+
+m4_consensus <- Anova(glmer(cbind(df$consensus, df$Callability - df$consensus) ~ df$Regime + (1 | df$Regime), family = binomial))
+
+#print(m1_consensus)
+print(m2_consensus)
+#print(m3_consensus)
+print(m4_consensus)
+```
+
+```{r}
+m1_probabilistic <- anova(glm(df$probabilistic ~ df$Regime, family = poisson(link = 'identity')), test = 'Chisq')
+
+m2_probabilistic <- Anova(glmer(df$probabilistic ~ df$Regime + (1 | df$Regime), family = poisson))
+
+m3_probabilistic <- anova(glm(cbind(df$probabilistic, df$Callability - df$probabilistic) ~ df$Regime, family = binomial(link = 'logit')), test = 'Chisq')
+
+m4_probabilistic <- Anova(glmer(cbind(df$probabilistic, df$Callability - df$probabilistic) ~ df$Regime + (1 | df$Regime), family = binomial))
+
+#print(m1_probabilistic)
+print(m2_probabilistic)
+#print(m3_probabilistic)
+print(m4_probabilistic)
+```
+
+# Pearson's correlation
+
+Correlation test between callability and number of mutations (overlap) across lines.
+
+```{r}
+
+cor.test(df$Callability, df$overlap, method = 'pearson')
+cor.test(df$Callability, df$consensus, method = 'pearson')
+cor.test(df$Callability, df$probabilistic, method = 'pearson')
+
+```
+
+# Mutation spectrum: generate data frames
+
+Three data frames will be generated; one for the consensus approach (**spectrum_consensus_df**), one for the probabilistic approach (**spectrum_probabilistic_df**), and one for the overlap (**spectrum_overlap_df**).
+
+column category:\
+category_1: G to A, C to T;\
+category_2: A to G, T to C;\
+category_3: G to C, C to G;\
+category_4: G to T, C to A;\
+category_5: T to G, A to C;\
+category_6: T to A, A to T.
+
+```{r}
+
+spectrum_overlap <- subset(singleton_raw, duplicated(singleton_raw$singleton_ID) & singleton_raw$filter == "PASS")[,c(1,2,5,6)]
+
+spectrum_overlap$category <- ifelse(spectrum_overlap$reference_allele == "G" &
+spectrum_overlap$alternate_allele == "A", "category_1",
+ifelse(spectrum_overlap$reference_allele == "C" &
+spectrum_overlap$alternate_allele == "T", "category_1",
+ifelse(spectrum_overlap$reference_allele == "A" &
+spectrum_overlap$alternate_allele == "G", "category_2",
+ifelse(spectrum_overlap$reference_allele == "T" &
+spectrum_overlap$alternate_allele == "C", "category_2",
+ifelse(spectrum_overlap$reference_allele == "G" &
+spectrum_overlap$alternate_allele == "C", "category_3",
+ifelse(spectrum_overlap$reference_allele == "C" &
+spectrum_overlap$alternate_allele == "G", "category_3",
+ifelse(spectrum_overlap$reference_allele == "G" &
+spectrum_overlap$alternate_allele == "T", "category_4",
+ifelse(spectrum_overlap$reference_allele == "C" &
+spectrum_overlap$alternate_allele == "A", "category_4",
+ifelse(spectrum_overlap$reference_allele == "T" &
+spectrum_overlap$alternate_allele == "G", "category_5",
+ifelse(spectrum_overlap$reference_allele == "A" &
+spectrum_overlap$alternate_allele == "C", "category_5",
+ifelse(spectrum_overlap$reference_allele == "T" &
+spectrum_overlap$alternate_allele == "A", "category_6",
+"category_6")))))))))))
+
+spectrum_overlap$category <- as.factor(spectrum_overlap$category)
+
+spectrum_overlap_df <- aggregate(spectrum_overlap$Sample, 
+                                 by = list(spectrum_overlap$Regime,
+                                           spectrum_overlap$category), FUN = NROW)
+colnames(spectrum_overlap_df) <- c("Regime", "category", "number")
+
+
+```
+
+```{r}
+
+spectrum_consensus <- subset(singleton_raw, singleton_raw$approach == "consensus" & singleton_raw$filter == "PASS")[,c(1,2,5,6)]
+
+spectrum_consensus$category <- ifelse(spectrum_consensus$reference_allele == "G" &
+spectrum_consensus$alternate_allele == "A", "category_1",
+ifelse(spectrum_consensus$reference_allele == "C" &
+spectrum_consensus$alternate_allele == "T", "category_1",
+ifelse(spectrum_consensus$reference_allele == "A" &
+spectrum_consensus$alternate_allele == "G", "category_2",
+ifelse(spectrum_consensus$reference_allele == "T" &
+spectrum_consensus$alternate_allele == "C", "category_2",
+ifelse(spectrum_consensus$reference_allele == "G" &
+spectrum_consensus$alternate_allele == "C", "category_3",
+ifelse(spectrum_consensus$reference_allele == "C" &
+spectrum_consensus$alternate_allele == "G", "category_3",
+ifelse(spectrum_consensus$reference_allele == "G" &
+spectrum_consensus$alternate_allele == "T", "category_4",
+ifelse(spectrum_consensus$reference_allele == "C" &
+spectrum_consensus$alternate_allele == "A", "category_4",
+ifelse(spectrum_consensus$reference_allele == "T" &
+spectrum_consensus$alternate_allele == "G", "category_5",
+ifelse(spectrum_consensus$reference_allele == "A" &
+spectrum_consensus$alternate_allele == "C", "category_5",
+ifelse(spectrum_consensus$reference_allele == "T" &
+spectrum_consensus$alternate_allele == "A", "category_6",
+"category_6")))))))))))
+
+spectrum_consensus$category <- as.factor(spectrum_consensus$category)
+
+spectrum_consensus_df <- aggregate(spectrum_consensus$Sample, 
+                                 by = list(spectrum_consensus$Regime,
+                                           spectrum_consensus$category), FUN = NROW)
+colnames(spectrum_consensus_df) <- c("Regime", "category", "number")
+
+
+```
+
+```{r}
+
+spectrum_probabilistic <- subset(singleton_raw, singleton_raw$approach == "probabilistic" & singleton_raw$filter == "PASS")[,c(1,2,5,6)]
+
+spectrum_probabilistic$category <- ifelse(spectrum_probabilistic$reference_allele == "G" &
+spectrum_probabilistic$alternate_allele == "A", "category_1",
+ifelse(spectrum_probabilistic$reference_allele == "C" &
+spectrum_probabilistic$alternate_allele == "T", "category_1",
+ifelse(spectrum_probabilistic$reference_allele == "A" &
+spectrum_probabilistic$alternate_allele == "G", "category_2",
+ifelse(spectrum_probabilistic$reference_allele == "T" &
+spectrum_probabilistic$alternate_allele == "C", "category_2",
+ifelse(spectrum_probabilistic$reference_allele == "G" &
+spectrum_probabilistic$alternate_allele == "C", "category_3",
+ifelse(spectrum_probabilistic$reference_allele == "C" &
+spectrum_probabilistic$alternate_allele == "G", "category_3",
+ifelse(spectrum_probabilistic$reference_allele == "G" &
+spectrum_probabilistic$alternate_allele == "T", "category_4",
+ifelse(spectrum_probabilistic$reference_allele == "C" &
+spectrum_probabilistic$alternate_allele == "A", "category_4",
+ifelse(spectrum_probabilistic$reference_allele == "T" &
+spectrum_probabilistic$alternate_allele == "G", "category_5",
+ifelse(spectrum_probabilistic$reference_allele == "A" &
+spectrum_probabilistic$alternate_allele == "C", "category_5",
+ifelse(spectrum_probabilistic$reference_allele == "T" &
+spectrum_probabilistic$alternate_allele == "A", "category_6",
+"category_6")))))))))))
+
+spectrum_probabilistic$category <- as.factor(spectrum_probabilistic$category)
+
+spectrum_probabilistic_df <- aggregate(spectrum_probabilistic$Sample, 
+                                 by = list(spectrum_probabilistic$Regime,
+                                           spectrum_probabilistic$category), FUN = NROW)
+colnames(spectrum_probabilistic_df) <- c("Regime", "category", "number")
+
+
+```
+
+# Mutation spectrum: chi-square test
+
+chisq.test for mutation spectrum for each approach and the overlapping.
+
+```{r}
+
+spectrum_overlap_df
+
+# update the numbers below
+
+
+spectrum_overlap_df_chisq.test <- cbind(c(12,5,8),c(0,0,1),c(0,0,0),c(0,0,1),c(0,0,0),c(0,0,0))
+dimnames(spectrum_overlap_df_chisq.test) <- 
+  list(Regime = c("T1", "T2", "T5"),
+       category = c("category_1", "category_2", "category_3", 
+                    "category_4", "category_5", "category_6"))
+
+spectrum_overlap_df_chisq.test <- as.data.frame(spectrum_overlap_df_chisq.test)
+
+chisq.test(spectrum_overlap_df_chisq.test,
+           simulate.p.value = TRUE, B = 10000)
+chisq.test(spectrum_overlap_df_chisq.test)$observed
+chisq.test(spectrum_overlap_df_chisq.test)$expected
+
+chisq.test(spectrum_overlap_df_chisq.test$category_1)
+chisq.test(spectrum_overlap_df_chisq.test$category_2)
+chisq.test(spectrum_overlap_df_chisq.test$category_4)
+
+chisq.test(spectrum_overlap_df_chisq.test[,c(1,2,4)],
+           simulate.p.value = TRUE, B = 10000)
+```
+
+```{r}
+
+spectrum_consensus_df
+
+# update the numbers below
+
+
+spectrum_consensus_df_chisq.test <- cbind(c(61,22,76),c(4,0,1),c(0,1,1),c(2,0,3),c(0,0,0),c(2,0,2))
+dimnames(spectrum_consensus_df_chisq.test) <- 
+  list(Regime = c("T1", "T2", "T5"),
+       category = c("category_1", "category_2", "category_3", 
+                    "category_4", "category_5", "category_6"))
+
+spectrum_consensus_df_chisq.test <- as.data.frame(spectrum_consensus_df_chisq.test)
+
+chisq.test(spectrum_consensus_df_chisq.test,
+           simulate.p.value = TRUE, B = 10000)
+chisq.test(spectrum_consensus_df_chisq.test)$observed
+chisq.test(spectrum_consensus_df_chisq.test)$expected
+
+chisq.test(spectrum_consensus_df_chisq.test$category_1)
+chisq.test(spectrum_consensus_df_chisq.test$category_2)
+chisq.test(spectrum_consensus_df_chisq.test$category_4)
+
+chisq.test(spectrum_consensus_df_chisq.test[,c(1,2,3,4,6)],
+           simulate.p.value = TRUE, B = 10000)
+```
+
+```{r}
+
+spectrum_probabilistic_df
+
+# update the numbers below
+
+
+spectrum_probabilistic_df_chisq.test <- cbind(c(131,36,103),c(6,3,6),c(1,2,1),c(12,2,4),c(1,1,3),c(3,0,7))
+dimnames(spectrum_probabilistic_df_chisq.test) <- 
+  list(Regime = c("T1", "T2", "T5"),
+       category = c("category_1", "category_2", "category_3", 
+                    "category_4", "category_5", "category_6"))
+
+spectrum_probabilistic_df_chisq.test <- as.data.frame(spectrum_probabilistic_df_chisq.test)
+
+chisq.test(spectrum_probabilistic_df_chisq.test,
+           simulate.p.value = TRUE, B = 10000)
+chisq.test(spectrum_probabilistic_df_chisq.test)$observed
+chisq.test(spectrum_probabilistic_df_chisq.test)$expected
+
+chisq.test(spectrum_probabilistic_df_chisq.test$category_1)
+chisq.test(spectrum_probabilistic_df_chisq.test$category_2)
+chisq.test(spectrum_probabilistic_df_chisq.test$category_4)
+
+chisq.test(spectrum_probabilistic_df_chisq.test[,c(1,2,3,4,5,6)],
+           simulate.p.value = TRUE, B = 10000)
+```
+
+# Transition-transversion: generate data frames
+
+Three data frames will be generated; one for the consensus approach (**TsTv_consensus_df**), one for the probabilistic approach (**TsTv_probabilistic_df**), and one for the overlap (**TsTv_overlap_df**).
+
+column TsTv:\
+A to G, G to A, C to T and T to C mutations are transitions; the rest are transversions.
+
+```{r}
+
+TsTv_overlap <- subset(singleton_raw, duplicated(singleton_raw$singleton_ID) & singleton_raw$filter == "PASS")[,c(1,2,5,6)]
+
+TsTv_overlap$TsTv <- ifelse(TsTv_overlap$reference_allele == "A" &
+                                TsTv_overlap$alternate_allele == "G", "Transition",
+                         ifelse(TsTv_overlap$reference_allele == "G" &
+                                TsTv_overlap$alternate_allele == "A", "Transition", 
+                         ifelse(TsTv_overlap$reference_allele == "C" &
+                                TsTv_overlap$alternate_allele == "T", "Transition", 
+                         ifelse(TsTv_overlap$reference_allele == "T" &
+                                TsTv_overlap$alternate_allele == "C", "Transition",
+                                "Transversion"))))
+
+TsTv_overlap_df <- 
+  aggregate(TsTv_overlap$Sample, 
+            by = list(TsTv_overlap$Regime, TsTv_overlap$Sample, TsTv_overlap$TsTv), 
+            FUN = NROW)
+colnames(TsTv_overlap_df) <- c("Regime", "Sample", "TsTv", "number")
+
+temp <-
+aggregate(TsTv_overlap$Sample, by = list(TsTv_overlap$Regime, TsTv_overlap$Sample), 
+          FUN = NROW)[,c(2,3)]
+colnames(temp) <- c("Sample", "total")
+
+TsTv_overlap_df <- merge(TsTv_overlap_df, temp, by = "Sample", all = T)
+TsTv_overlap_df$perc <- TsTv_overlap_df$number/TsTv_overlap_df$total
+
+
+```
+
+```{r}
+
+TsTv_consensus <- singleton_raw[which(singleton_raw$filter == "PASS" & singleton_raw$approach == "consensus"),][,c(1,2,5,6)]
+
+TsTv_consensus$TsTv <- ifelse(TsTv_consensus$reference_allele == "A" &
+                                TsTv_consensus$alternate_allele == "G", "Transition",
+                         ifelse(TsTv_consensus$reference_allele == "G" &
+                                TsTv_consensus$alternate_allele == "A", "Transition", 
+                         ifelse(TsTv_consensus$reference_allele == "C" &
+                                TsTv_consensus$alternate_allele == "T", "Transition", 
+                         ifelse(TsTv_consensus$reference_allele == "T" &
+                                TsTv_consensus$alternate_allele == "C", "Transition",
+                                "Transversion"))))
+
+TsTv_consensus_df <- 
+  aggregate(TsTv_consensus$Sample, 
+            by = list(TsTv_consensus$Regime, TsTv_consensus$Sample, TsTv_consensus$TsTv),
+            FUN = NROW)
+colnames(TsTv_consensus_df) <- c("Regime", "Sample", "TsTv", "number")
+
+temp <-
+aggregate(TsTv_consensus$Sample, by = list(TsTv_consensus$Regime, TsTv_consensus$Sample),
+          FUN = NROW)[,c(2,3)]
+colnames(temp) <- c("Sample", "total")
+
+TsTv_consensus_df <- merge(TsTv_consensus_df, temp, by = "Sample", all = T)
+TsTv_consensus_df$perc <- TsTv_consensus_df$number/TsTv_consensus_df$total
+
+
+```
+
+```{r}
+
+
+TsTv_probabilistic <- singleton_raw[which(singleton_raw$filter == "PASS" & singleton_raw$approach == "probabilistic"),][,c(1,2,5,6)]
+
+TsTv_probabilistic$TsTv <- ifelse(TsTv_probabilistic$reference_allele == "A" &
+                                TsTv_probabilistic$alternate_allele == "G", "Transition",
+                         ifelse(TsTv_probabilistic$reference_allele == "G" &
+                                TsTv_probabilistic$alternate_allele == "A", "Transition", 
+                         ifelse(TsTv_probabilistic$reference_allele == "C" &
+                                TsTv_probabilistic$alternate_allele == "T", "Transition", 
+                         ifelse(TsTv_probabilistic$reference_allele == "T" &
+                                TsTv_probabilistic$alternate_allele == "C", "Transition",
+                                "Transversion"))))
+
+TsTv_probabilistic_df <- 
+  aggregate(TsTv_probabilistic$Sample, 
+            by = list(TsTv_probabilistic$Regime, TsTv_probabilistic$Sample, TsTv_probabilistic$TsTv),
+            FUN = NROW)
+colnames(TsTv_probabilistic_df) <- c("Regime", "Sample", "TsTv", "number")
+
+temp <-
+aggregate(TsTv_probabilistic$Sample, by = list(TsTv_probabilistic$Regime, TsTv_probabilistic$Sample),
+          FUN = NROW)[,c(2,3)]
+colnames(temp) <- c("Sample", "total")
+
+TsTv_probabilistic_df <- merge(TsTv_probabilistic_df, temp, by = "Sample", all = T)
+TsTv_probabilistic_df$perc <- TsTv_probabilistic_df$number/TsTv_probabilistic_df$total
+
+
+```
+
+# Transition-transversion: chi-square test
+
+chisq.test for the occurrence of transitions and transversions for each approach and the overlapping.
+
+```{r}
+
+TsTv <- rep(c("Transition", "Transversion"), times = 18)
+Regime <- rep(c("T1", "T2", "T5"), each = 36)
+Sample <- rep(c("T1-10", "T1-19", "T1-37", "T1-46", "T1-57", "T1-6", 
+                "T2-1", "T2-22", "T2-34", "T2-4", "T2-42", "T2-52", 
+                "T5-45", "T5-5", "T5-70", "T5-81", "T5-86", "T5-87"), each = 2)
+
+temp <- cbind(cbind(Regime, Sample), TsTv)
+
+TsTv_overlap_df_temp1 <- merge(TsTv_overlap_df, temp, 
+                                  by = c("Regime", "Sample", "TsTv"), all = T)
+
+TsTv_overlap_df_temp1[is.na(TsTv_overlap_df_temp1)] <- 0
+
+TsTv_overlap_df_temp2 <- aggregate(TsTv_overlap_df_temp1$number,
+                                            by = list(TsTv_overlap_df_temp1$Regime,
+                                                      TsTv_overlap_df_temp1$TsTv),
+                                            FUN = sum)
+colnames(TsTv_overlap_df_temp2) <- c("Regime", "TsTv", "count")
+
+# update the numbers below
+
+
+TsTv_overlap_df_chisq.test <- rbind(c(12,5,19),c(0,0,1))
+dimnames(TsTv_overlap_df_chisq.test) <- 
+  list(category = c("Transition", "Transversion"),
+       Regime = c("T1", "T2", "T5"))
+
+TsTv_overlap_df_chisq.test <- as.data.frame(TsTv_overlap_df_chisq.test)
+
+chisq.test(TsTv_overlap_df_chisq.test,
+           simulate.p.value = TRUE, B = 10000)
+chisq.test(TsTv_overlap_df_chisq.test)$observed
+chisq.test(TsTv_overlap_df_chisq.test)$expected
+
+chisq.test(TsTv_overlap_df_chisq.test$T1,
+           simulate.p.value = TRUE, B = 10000)
+chisq.test(TsTv_overlap_df_chisq.test$T2,
+           simulate.p.value = TRUE, B = 10000)
+chisq.test(TsTv_overlap_df_chisq.test$T5,
+           simulate.p.value = TRUE, B = 10000)
+
+```
+
+```{r}
+
+TsTv <- rep(c("Transition", "Transversion"), times = 18)
+Regime <- rep(c("T1", "T2", "T5"), each = 36)
+Sample <- rep(c("T1-10", "T1-19", "T1-37", "T1-46", "T1-57", "T1-6", 
+                "T2-1", "T2-22", "T2-34", "T2-4", "T2-42", "T2-52", 
+                "T5-45", "T5-5", "T5-70", "T5-81", "T5-86", "T5-87"), each = 2)
+
+temp <- cbind(cbind(Regime, Sample), TsTv)
+
+TsTv_consensus_df_temp1 <- merge(TsTv_consensus_df, temp, 
+                                  by = c("Regime", "Sample", "TsTv"), all = T)
+
+TsTv_consensus_df_temp1[is.na(TsTv_consensus_df_temp1)] <- 0
+
+TsTv_consensus_df_temp2 <- aggregate(TsTv_consensus_df_temp1$number,
+                                            by = list(TsTv_consensus_df_temp1$Regime,
+                                                      TsTv_consensus_df_temp1$TsTv),
+                                            FUN = sum)
+colnames(TsTv_consensus_df_temp2) <- c("Regime", "TsTv", "count")
+
+TsTv_consensus_df_temp2
+
+# update the numbers below
+
+
+TsTv_consensus_df_chisq.test <- rbind(c(65,22,77),c(4,1,6))
+dimnames(TsTv_consensus_df_chisq.test) <- 
+  list(category = c("Transition", "Transversion"),
+       Regime = c("T1", "T2", "T5"))
+
+TsTv_consensus_df_chisq.test <- as.data.frame(TsTv_consensus_df_chisq.test)
+
+chisq.test(TsTv_consensus_df_chisq.test,
+           simulate.p.value = TRUE, B = 10000)
+chisq.test(TsTv_consensus_df_chisq.test)$observed
+chisq.test(TsTv_consensus_df_chisq.test)$expected
+
+chisq.test(TsTv_consensus_df_chisq.test$T1,
+           simulate.p.value = TRUE, B = 10000)
+chisq.test(TsTv_consensus_df_chisq.test$T2,
+           simulate.p.value = TRUE, B = 10000)
+chisq.test(TsTv_consensus_df_chisq.test$T5,
+           simulate.p.value = TRUE, B = 10000)
+
+```
+
+```{r}
+
+
+TsTv <- rep(c("Transition", "Transversion"), times = 18)
+Regime <- rep(c("T1", "T2", "T5"), each = 36)
+Sample <- rep(c("T1-10", "T1-19", "T1-37", "T1-46", "T1-57", "T1-6", 
+                "T2-1", "T2-22", "T2-34", "T2-4", "T2-42", "T2-52", 
+                "T5-45", "T5-5", "T5-70", "T5-81", "T5-86", "T5-87"), each = 2)
+
+temp <- cbind(cbind(Regime, Sample), TsTv)
+
+TsTv_probabilistic_df_temp1 <- merge(TsTv_probabilistic_df, temp, 
+                                  by = c("Regime", "Sample", "TsTv"), all = T)
+
+TsTv_probabilistic_df_temp1[is.na(TsTv_probabilistic_df_temp1)] <- 0
+
+TsTv_probabilistic_df_temp2 <- aggregate(TsTv_probabilistic_df_temp1$number,
+                                            by = list(TsTv_probabilistic_df_temp1$Regime,
+                                                      TsTv_probabilistic_df_temp1$TsTv),
+                                            FUN = sum)
+colnames(TsTv_probabilistic_df_temp2) <- c("Regime", "TsTv", "count")
+
+TsTv_probabilistic_df_temp2
+
+# update the numbers below
+
+
+TsTv_probabilistic_df_chisq.test <- rbind(c(137,39,109),c(17,4,13))
+dimnames(TsTv_probabilistic_df_chisq.test) <- 
+  list(category = c("Transition", "Transversion"),
+       Regime = c("T1", "T2", "T5"))
+
+TsTv_probabilistic_df_chisq.test <- as.data.frame(TsTv_probabilistic_df_chisq.test)
+
+chisq.test(TsTv_probabilistic_df_chisq.test,
+           simulate.p.value = TRUE, B = 10000)
+chisq.test(TsTv_probabilistic_df_chisq.test)$observed
+chisq.test(TsTv_probabilistic_df_chisq.test)$expected
+
+chisq.test(TsTv_probabilistic_df_chisq.test$T1,
+           simulate.p.value = TRUE, B = 10000)
+chisq.test(TsTv_probabilistic_df_chisq.test$T2,
+           simulate.p.value = TRUE, B = 10000)
+chisq.test(TsTv_probabilistic_df_chisq.test$T5,
+           simulate.p.value = TRUE, B = 10000)
+```
+
+# VEP (Variant Effect Prediction): prepare input
+
+Prepare the input file for blast. This step is necessary because the reference assembly we use (ASM164373v4) is not available for VEP on WormBase.
+
+Specifically, prepare the file as below, then use the file "\~/My Drive/Nematode/Nematode_ASM164373v4_data/VEP_input.txt" to blast against GCF_010183535.1 assembly (which is available for VEP on WormBase) to derive corresponding chromosome and position for variant effect prediction (VEP).
+
+Blast each site and store the scaffold name, the beginning and the end of the fragment, then save it as "\~/My Drive/Nematode/Nematode_ASM164373v4_data/VEP_input_blast.txt"
+
+```{r}
+VEP_input <- subset(singleton_raw, duplicated(singleton_raw$singleton_ID) & singleton_raw$filter == "PASS")[,c(3,4,5,6)]
+VEP_input$position <- as.integer(as.character(VEP_input$position))
+
+VEP_input$beg <- VEP_input$position - 200
+VEP_input$end <- VEP_input$position + 200
+
+write.table(VEP_input, file = "~/My Drive/Nematode/Nematode_ASM164373v4_data/VEP_input.txt", append = FALSE, row.names = FALSE, col.names = FALSE)
+```
+
+Prepare the input file for VEP.
+
+Specifically, prepare the file as below, then upload the file "\~/My Drive/Nematode/Nematode_ASM164373v4_data/VEP_input_blast_submit.txt" to WomBase for VEP.
+
+Download the output of VEP as txt, save it as "\~/My Drive/Nematode/Nematode_ASM164373v4_data/VEP_output.txt" and proceed to the next step.
+
+```{r}
+
+VEP_input_blast <- read.table(file = "~/My Drive/Nematode/Nematode_ASM164373v4_data/VEP_input_blast.txt")
+
+colnames(VEP_input_blast) <- c("chromosome", "position", "reference_allele", "alternate_allele", "blast_query_beg", "blast_query_end", "GCF_010183535.1_RefSeq_ID", "GCF_010183535.1_RefSeq_beg", "GCF_010183535.1_RefSeq_end")
+
+VEP_input_blast$chromosome <- as.factor(VEP_input_blast$chromosome)
+VEP_input_blast$reference_allele <- as.factor(VEP_input_blast$reference_allele)
+VEP_input_blast$alternate_allele <- as.factor(VEP_input_blast$alternate_allele)
+VEP_input_blast$GCF_010183535.1_RefSeq_ID <- as.factor(VEP_input_blast$GCF_010183535.1_RefSeq_ID)
+
+VEP_input_blast$GCF_010183535.1_RefSeq_chromosome <- 
+  ifelse(VEP_input_blast$GCF_010183535.1_RefSeq_ID == "NC_071328.1", "I",
+  ifelse(VEP_input_blast$GCF_010183535.1_RefSeq_ID == "NC_071329.1", "II",
+  ifelse(VEP_input_blast$GCF_010183535.1_RefSeq_ID == "NC_071330.1", "III",
+  ifelse(VEP_input_blast$GCF_010183535.1_RefSeq_ID == "NC_071331.1", "IV",
+  ifelse(VEP_input_blast$GCF_010183535.1_RefSeq_ID == "NC_071332.1", "V", "X")))))
+VEP_input_blast$GCF_010183535.1_RefSeq_chromosome <- as.factor(VEP_input_blast$GCF_010183535.1_RefSeq_chromosome)
+
+VEP_input_blast$GCF_010183535.1_RefSeq_position <- VEP_input_blast$GCF_010183535.1_RefSeq_beg+200
+
+VEP_input_blast$variable = "."
+
+VEP_input_blast_submit <- VEP_input_blast[,c(10,11,12,3,4,12,12,12)]
+
+write.table(VEP_input_blast_submit, file = "~/My Drive/Nematode/Nematode_ASM164373v4_data/VEP_input_blast_submit.txt", append = FALSE, row.names = FALSE, col.names = FALSE)
+```
+
+# Load data: VEP output
+
+load VEP output and generate a data frame for analysis (**VEP_analysis**).
+
+```{r}
+
+VEP_output <- read.table(file = "~/My Drive/Nematode/Nematode_ASM164373v4_data/VEP_output.txt")
+colnames(VEP_output) <- VEP_output[c(1),]
+VEP_output <- VEP_output[c(2:104),]
+
+VEP_output_temp <- subset(singleton_raw, duplicated(singleton_raw$singleton_ID) & singleton_raw$filter == "PASS")[,c(1:4)]
+
+VEP_output_temp$ID <- paste(VEP_output_temp$chromosome, VEP_output_temp$position, sep = ":")
+VEP_input_blast_temp <- VEP_input_blast
+VEP_input_blast_temp$ID <- paste(VEP_input_blast_temp$chromosome, VEP_input_blast_temp$position, sep = ":")
+VEP_input_blast_temp$Location_temp <- paste(VEP_input_blast_temp$GCF_010183535.1_RefSeq_chromosome, VEP_input_blast_temp$GCF_010183535.1_RefSeq_position, sep = ":")
+VEP_input_blast_temp$Location <- paste(VEP_input_blast_temp$Location_temp, VEP_input_blast_temp$GCF_010183535.1_RefSeq_position, sep = "-")
+
+VEP_analysis <- merge(VEP_input_blast_temp, VEP_output_temp[,c(1,2,5)], by = "ID", all = T)
+VEP_analysis <- merge(VEP_analysis, VEP_output, by = "Location", all = T)
+
+VEP_analysis <- subset(VEP_analysis, select = c("Regime", "Sample", "Location", "ID", "Consequence", "IMPACT"))
+```
+
+# VEP analysis
+
+## Impact
+
+Prepare input file
+
+```{r}
+
+VEP_analysis$Location <- as.factor(VEP_analysis$Location)
+VEP_analysis$ID <- as.factor(VEP_analysis$ID)
+VEP_analysis$Consequence <- as.factor(VEP_analysis$Consequence)
+VEP_analysis$IMPACT <- as.factor(VEP_analysis$IMPACT)
+
+VEP_analysis_IMPACT <- 
+  aggregate(VEP_analysis$Sample, 
+            by = list(VEP_analysis$Regime, VEP_analysis$Sample, VEP_analysis$IMPACT),
+            FUN = NROW)
+colnames(VEP_analysis_IMPACT) <- c("Regime", "Sample", "IMPACT", "Number")
+
+VEP_analysis_IMPACT_df_temp1 <- aggregate(VEP_analysis_IMPACT$Number, 
+                                           by = list(VEP_analysis_IMPACT$Regime), 
+                                           FUN = sum)
+colnames(VEP_analysis_IMPACT_df_temp1) <- c("Regime", "Total")
+
+VEP_analysis_IMPACT_df_temp2 <- aggregate(VEP_analysis_IMPACT$Number, 
+                                         by = list(VEP_analysis_IMPACT$Regime,
+                                                   VEP_analysis_IMPACT$IMPACT), 
+                                         FUN = sum)
+colnames(VEP_analysis_IMPACT_df_temp2) <- c("Regime", "IMPACT", "Number")
+
+
+VEP_analysis_IMPACT_df <- merge(VEP_analysis_IMPACT_df_temp1,
+                                     VEP_analysis_IMPACT_df_temp2,
+                                     by = "Regime", all = T)
+
+VEP_analysis_IMPACT_df$perc <- VEP_analysis_IMPACT_df$Number/VEP_analysis_IMPACT_df$Total
+
+
+# 
+# VEP_analysis_IMPACT_temp <-
+# aggregate(VEP_analysis_IMPACT$Number, by = list(VEP_analysis_IMPACT$Sample), 
+#           FUN = sum)
+# colnames(VEP_analysis_IMPACT_temp) <- c("Sample", "Total")
+# 
+# VEP_analysis_IMPACT <- merge(VEP_analysis_IMPACT, VEP_analysis_IMPACT_temp, 
+#                                   by = "Sample", all = T)
+# 
+# VEP_analysis_IMPACT$perc <- 
+# VEP_analysis_IMPACT$Number/VEP_analysis_IMPACT$Total
+
+```
+
+chisq.test
+
+```{r}
+VEP_analysis_IMPACT_df
+
+# update the numbers below
+
+VEP_analysis_IMPACT_chisq.test <- cbind(c(2,0,0),c(1,1,6),c(3,2,4),c(39,8,37))
+dimnames(VEP_analysis_IMPACT_chisq.test) <- 
+  list(Regime = c("T1", "T2", "T5"),
+       IMPACT = c("HIGH", "LOW", "MODERATE", "MODIFIER"))
+
+VEP_analysis_IMPACT_chisq.test <- as.data.frame(VEP_analysis_IMPACT_chisq.test)
+
+
+chisq.test(VEP_analysis_IMPACT_chisq.test,
+           simulate.p.value = TRUE, B = 10000)
+chisq.test(VEP_analysis_IMPACT_chisq.test)$observed
+chisq.test(VEP_analysis_IMPACT_chisq.test)$expected
+
+chisq.test(VEP_analysis_IMPACT_chisq.test$HIGH,
+           simulate.p.value = TRUE, B = 10000)
+chisq.test(VEP_analysis_IMPACT_chisq.test$LOW,
+           simulate.p.value = TRUE, B = 10000)
+chisq.test(VEP_analysis_IMPACT_chisq.test$MODERATE,
+           simulate.p.value = TRUE, B = 10000)
+chisq.test(VEP_analysis_IMPACT_chisq.test$MODIFIER,
+           simulate.p.value = TRUE, B = 10000)
+```
+
+## Consequence
+
+Prepare input file
+
+```{r}
+
+VEP_analysis$Location <- as.factor(VEP_analysis$Location)
+VEP_analysis$ID <- as.factor(VEP_analysis$ID)
+VEP_analysis$Consequence <- as.factor(VEP_analysis$Consequence)
+VEP_analysis$IMPACT <- as.factor(VEP_analysis$IMPACT)
+
+VEP_analysis_Consequence <- 
+  aggregate(VEP_analysis$Sample, 
+            by = list(VEP_analysis$Regime, VEP_analysis$Sample, VEP_analysis$Consequence),
+            FUN = NROW)
+colnames(VEP_analysis_Consequence) <- c("Regime", "Sample", "Consequence", "Number")
+
+VEP_analysis_Consequence_df_temp1 <- aggregate(VEP_analysis_Consequence$Number, 
+                                           by = list(VEP_analysis_Consequence$Regime), 
+                                           FUN = sum)
+colnames(VEP_analysis_Consequence_df_temp1) <- c("Regime", "Total")
+
+VEP_analysis_Consequence_df_temp2 <- aggregate(VEP_analysis_Consequence$Number, 
+                                         by = list(VEP_analysis_Consequence$Regime,
+                                                   VEP_analysis_Consequence$Consequence), 
+                                         FUN = sum)
+colnames(VEP_analysis_Consequence_df_temp2) <- c("Regime", "Consequence", "Number")
+
+
+VEP_analysis_Consequence_df <- merge(VEP_analysis_Consequence_df_temp1,
+                                     VEP_analysis_Consequence_df_temp2,
+                                     by = "Regime", all = T)
+
+VEP_analysis_Consequence_df$perc <- VEP_analysis_Consequence_df$Number/VEP_analysis_Consequence_df$Total
+
+```
+
+chisq.test
+
+```{r}
+
+VEP_analysis_Consequence_df
+
+# update the numbers below
+
+VEP_analysis_Consequence_chisq.test <- cbind(c(18,4,18),c(0,0,1),c(2,1,2),
+                                             c(3,2,4),c(1,0,0),c(1,0,0),
+                                             c(1,1,6),c(19,3,16))
+dimnames(VEP_analysis_Consequence_chisq.test) <- 
+  list(Regime = c("T1", "T2", "T5"),
+       Consequence = c("downstream_gene_variant", "intergenic_variant", "intron_variant", 
+                      "missense_variant", "splice_donor_variant" ,"stop_gained",
+                      "synonymous_variant","upstream_gene_variant"))
+
+VEP_analysis_Consequence_chisq.test <- as.data.frame(VEP_analysis_Consequence_chisq.test)
+
+chisq.test(VEP_analysis_Consequence_chisq.test,
+           simulate.p.value = TRUE, B = 10000)
+chisq.test(VEP_analysis_Consequence_chisq.test)$observed
+chisq.test(VEP_analysis_Consequence_chisq.test)$expected
+
+chisq.test(VEP_analysis_Consequence_chisq.test$downstream_gene_variant,
+           simulate.p.value = TRUE, B = 10000)
+chisq.test(VEP_analysis_Consequence_chisq.test$intergenic_variant,
+           simulate.p.value = TRUE, B = 10000)
+chisq.test(VEP_analysis_Consequence_chisq.test$intron_variant,
+           simulate.p.value = TRUE, B = 10000)
+chisq.test(VEP_analysis_Consequence_chisq.test$missense_variant,
+           simulate.p.value = TRUE, B = 10000)
+chisq.test(VEP_analysis_Consequence_chisq.test$splice_donor_variant,
+           simulate.p.value = TRUE, B = 10000)
+chisq.test(VEP_analysis_Consequence_chisq.test$stop_gained,
+           simulate.p.value = TRUE, B = 10000)
+chisq.test(VEP_analysis_Consequence_chisq.test$synonymous_variant,
+           simulate.p.value = TRUE, B = 10000)
+chisq.test(VEP_analysis_Consequence_chisq.test$upstream_gene_variant,
+           simulate.p.value = TRUE, B = 10000)
+```
+
+# Figure 1
+
+```{r}
+line_survival_df <- subset(line_survival, line_survival$Regime == "T1 (set 1)" | line_survival$Regime == "T2" | line_survival$Regime == "T5 (set 2)")
+
+line_survival_df <- line_survival_df[line_survival_df$Generation < 4,]
+
+line_survival_df$Regime <- c("Young T1", "Young T1", "Young T1", "Young T1", 
+                             "Peak T2", "Peak T2", "Peak T2", "Peak T2", 
+                             "Old T5", "Old T5", "Old T5", "Old T5")
+line_survival_df$Generation_factor <- c("M0", "M1", "M2", "M3", "M0", "M1", "M2", "M3", "M0", "M1", "M2", "M3")
+line_survival_df$survival <- line_survival_df$Number/60
+
+pdf(file = "/Users/rnt500/My Drive/Nematode/Nematode_ASM164373v4_MS/Nematode_MS_v6/Figure_1.pdf", width = 4, height = 4) # The size of the plot in inches
+
+ggplot(line_survival_df, aes(x = Generation_factor, y = survival, group = Regime, color = Regime))+
+  geom_line()+
+  geom_point(size = 3)+
+  scale_color_manual(values = Palette)+
+  scale_y_continuous(name = expression("% of lines alive"),
+                     breaks = c(0,0.2,0.4,0.6,0.8,1.0),
+                     labels = c("0","20","40","60","80","100"),
+                     limits = c(0,1)) + 
+  scale_x_discrete(name = "Generation")+
+  theme_classic()+
+  theme(axis.title.x = element_text(size = 15),
+        axis.title.y = element_text(size = 15),
+        axis.text.x = element_text(size = 12),
+        axis.text.y = element_text(size = 12),
+        legend.justification = c(0, 0), legend.position = c(0, 0),
+        legend.background = element_rect(fill='transparent'))+
+  guides(color = guide_legend(reverse=TRUE))
+
+dev.off()
+```
+
+# Figure 2
+
+```{r}
+Figure_2 <- cbind(aggregate(df$mu_overlap, list(df$Regime), FUN = mean),
+              aggregate(df$mu_overlap, list(df$Regime), FUN = se)[,2])
+colnames(Figure_2) <- c("Regime","Mean_mu","SE_mu")
+
+pdf(file = "/Users/rnt500/My Drive/Nematode/Nematode_ASM164373v4_MS/Nematode_MS_v6/Figure_2.pdf", width = 4, height = 4) # The size of the plot in inches
+
+ggplot()+
+  geom_bar(data = Figure_2,
+       aes(x = Regime, y = Mean_mu,  fill = Regime),
+       stat="identity", position=position_dodge())+
+  geom_errorbar(data = Figure_2,
+                aes(x = Regime, y = Mean_mu, ymin = Mean_mu-SE_mu, ymax = Mean_mu+SE_mu),
+                stat="identity", position=position_dodge(), width=0.4)+
+  geom_jitter(data = df, aes(x = Regime, y = mu_overlap))+
+  scale_fill_manual(values = Palette, 
+                    labels = c("Young T1", "Peak T2", "Old T5"))+
+  scale_y_continuous(name = expression("Mutation rate (X10"^{-8}~")"),
+                     breaks = c(-0.1E-8, 0, 0.5E-8, 1E-8, 1.5E-8, 2E-8, 2.5E-8, 3E-8, 3.5E-8, 4E-8),
+                     labels = c("","0","0.5","1","1.5","2","2.5","3","3.5","4"),
+                     limits = c(-0.1E-8,4E-8)) + 
+  theme_classic()+
+  theme(axis.title.x = element_text(size = 15),
+        axis.title.y = element_text(size = 15),
+        axis.text.x = element_text(size = 12),
+        axis.text.y = element_text(size = 12),
+        legend.position = "none")
+dev.off()
+
+```
+
+# Figure 3
+
+```{r}
+
+Figure_3_temp <- cbind(aggregate(TsTv_overlap_df$perc, 
+                            by = list(TsTv_overlap_df$Regime,
+                                      TsTv_overlap_df$TsTv), FUN = mean),
+                       aggregate(TsTv_overlap_df$perc, 
+                            by = list(TsTv_overlap_df$Regime,
+                                      TsTv_overlap_df$TsTv), FUN = se)[,3])
+colnames(Figure_3_temp) <- c("Regime", "TsTv", "mean", "se")
+
+Regime <- c("T1", "T2", "T5")
+TsTv <- c("Transition", "Transversion", "Transition", "Transversion", "Transition", "Transversion")
+
+temp <- data.frame(rep(Regime, each = 2), TsTv)
+colnames(temp) <- c("Regime", "TsTv")
+
+Figure_3 <- merge(temp, Figure_3_temp, 
+                  by.x = c("Regime", "TsTv"), by.y = c("Regime", "TsTv"), all = T)
+
+
+Figure_3[is.na(Figure_3)] <- 0
+
+Figure_3$Regime <- as.factor(Figure_3$Regime)
+Figure_3$TsTv <- as.factor(Figure_3$TsTv)
+
+
+pdf(file = "/Users/rnt500/My Drive/Nematode/Nematode_ASM164373v4_MS/Nematode_MS_v6/Figure_3.pdf", width = 6, height = 4) # The size of the plot in inches
+
+ggplot(Figure_3, aes(x = TsTv, y = mean, fill = Regime))+
+  geom_bar(stat="identity", position=position_dodge())+
+  geom_errorbar(aes(ymin=mean-se, ymax=mean+se), width=.2,
+                 position=position_dodge(.9))+
+  scale_fill_manual(values = Palette, 
+                    labels = c("Young T1", "Peak T2", "Old T5"))+
+  scale_y_continuous((name = "% of mutations"),
+                     breaks = c(0,0.2,0.4,0.6,0.8,1),
+                     labels = c("0","20","40","60","80","100"),
+                     limits = c(0,1)) + 
+  scale_x_discrete(name = "Category of mutations")+
+  theme_classic()+
+  theme(axis.title.x = element_text(size = 15),
+        axis.title.y = element_text(size = 15),
+        axis.text.x = element_text(size = 12),
+        axis.text.y = element_text(size = 12))
+
+dev.off()
+```
+
+# Figure 4
+
+```{r}
+missing = list(Regime = c("T1","T2",
+                          "T2","T5",
+                          "T2","T5"), 
+               Total = c(0,0,0,0,0,0),
+               Consequence = c("intergenic_variant","intergenic_variant",
+                               "splice_donor_variant","splice_donor_variant",
+                               "stop_gained","stop_gained"),
+               Number = c(0,0,0,0,0,0),
+               perc = c(0,0,0,0,0,0))
+
+VEP_analysis_Consequence_plot <- rbind(VEP_analysis_Consequence_df,missing)
+
+Figure_4a <- 
+ggplot(VEP_analysis_Consequence_plot, aes(x = Consequence, y = perc, fill = Regime) )+
+  geom_bar(stat="identity", position=position_dodge())+
+  scale_fill_manual(values = Palette,
+                    labels = c("Young T1", "Peak T2", "Old T5"))+
+  scale_y_continuous((name = "% of mutations"),
+                     breaks = c(0,0.2,0.4,0.6,0.8,1.0),
+                     labels = c("0","20","40","60","80","100"),
+                     limits = c(0,1)) + 
+  scale_x_discrete(name = "Consequence")+
+  theme_classic()+
+  theme(axis.title.x = element_text(size = 15),
+        axis.title.y = element_text(size = 15),
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size = 8),
+        axis.text.y = element_text(size = 12),
+        legend.position = "none")+
+  labs(tag = "A)")
+```
+
+```{r}
+missing = list(Regime = c("T2","T5"), 
+               Total = c(0,0),
+               IMPACT = c("HIGH","HIGH"),
+               Number = c(0,0),
+               perc = c(0,0))
+
+VEP_analysis_IMPACT_plot <- rbind(VEP_analysis_IMPACT_df,missing)
+
+Figure_4b <- 
+ggplot(VEP_analysis_IMPACT_plot, aes(x = IMPACT, y = perc, fill = Regime) )+
+  geom_bar(stat="identity", position=position_dodge())+
+  scale_fill_manual(values = Palette,
+                    labels = c("Young T1", "Peak T2", "Old T5"))+
+  scale_y_continuous((name = "% of mutations"),
+                     breaks = c(0,0.2,0.4,0.6,0.8,1),
+                     labels = c("0","20","40","60","80","100"),
+                     limits = c(0,1)) + 
+  scale_x_discrete(name = "Impact")+
+  theme_classic()+
+  theme(axis.title.x = element_text(size = 15),
+        axis.title.y = element_text(size = 15),
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size = 10),
+        axis.text.y = element_text(size = 12))+
+  labs(tag = "B)")
+```
+
+```{r}
+pdf(file = "/Users/rnt500/My Drive/Nematode/Nematode_ASM164373v4_MS/Nematode_MS_v6/Figure_4.pdf", width = 8, height = 4) # The size of the plot in inches
+
+grid.arrange(Figure_4a, Figure_4b, ncol = 2)
+
+dev.off()
+```
+
+# Figure S2
+
+```{r}
+
+line_survival_1 <- line_survival[which(line_survival$Regime != "T5 (set 1)"),]
+line_survival_2 <- line_survival[which(line_survival$Regime == "T5 (set 1)"),]
+
+line_survival_1$survival <- line_survival_1$Number/60
+line_survival_2$survival <- line_survival_2$Number/89
+
+line_survival_all <- rbind(line_survival_1, line_survival_2)
+
+str(line_survival_all)
+
+pdf(file = "/Users/rnt500/My Drive/Nematode/Nematode_ASM164373v4_MS/Nematode_MS_v6/Figure_S2.pdf", width = 6, height = 4) # The size of the plot in inches
+
+ggplot(line_survival_all, aes(x = factor(Generation), y = Number, group = Regime, color = Regime))+
+  geom_line()+
+  geom_point(aes(shape = Regime), size = 3)+
+  scale_color_manual(
+    values = c("#DD8D29","#DD8D29", 
+               "#E2D200", 
+               "#9986A5", "#F4B5BD",
+               "#46ACC8", "#46ACC8", 
+               "#9C964A"))+
+  scale_shape_manual(values = c(16,1,16,16,16,16,1,16)) +
+  scale_y_continuous(name = "Number of lines alive") + 
+  scale_x_discrete(name = "Generation",
+                   breaks = c(0,1,2,3,4,5,6,7,8,9,10),
+                   labels = c("M0", "M1", "M2", "M3", "M4", "M5", "M6", "M7", "M8", "M9", "M10"))+
+  theme_classic()+
+  theme(axis.title.x = element_text(size = 15),
+        axis.title.y = element_text(size = 15),
+        axis.text.x = element_text(size = 12),
+        axis.text.y = element_text(size = 12),
+        #legend.justification = c(1, 1), legend.position = c(1, 1),
+        legend.background = element_rect(fill='transparent'))
+
+
+dev.off()
+```
+
+# Figure S5
+
+```{r}
+
+Figure_S5a <-
+ggplot(df, aes(x = Sample, y = consensus, fill = Regime))+
+  geom_bar(stat="identity", position=position_dodge())+
+  scale_fill_manual(values = Palette,
+                    labels = c("Young T1", "Peak T2", "Old T5"))+
+  scale_y_continuous((name = "Number of accepted mutations"),
+                     limits = c(0,70)) + 
+  scale_x_discrete(name = "MA line ID")+
+  theme_classic()+
+  theme(plot.title = element_text(hjust = 0.5, size = 15),
+        axis.title.x = element_text(size = 15),
+        axis.title.y = element_text(size = 15),
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size = 12),
+        axis.text.y = element_text(size = 12))+
+  labs(title = "Consensus approach",
+       tag = "A)")
+```
+
+```{r}
+Figure_S5b <-
+ggplot(df, aes(x = Sample, y = probabilistic, fill = Regime))+
+  geom_bar(stat="identity", position=position_dodge())+
+  scale_fill_manual(values = Palette,
+                    labels = c("Young T1", "Peak T2", "Old T5"))+
+  scale_y_continuous((name = "Number of accepted mutations"),
+                     limits = c(0,70)) + 
+  scale_x_discrete(name = "MA line ID")+
+  theme_classic()+
+  theme(plot.title = element_text(hjust = 0.5, size = 15),
+        axis.title.x = element_text(size = 15),
+        axis.title.y = element_text(size = 15),
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size = 12),
+        axis.text.y = element_text(size = 12))+
+  labs(title = "Probabilistic approach",
+       tag = "B)")
+```
+
+```{r}
+Figure_S5c<-
+ggplot(df, aes(x = Sample, y = overlap, fill = Regime))+
+  geom_bar(stat="identity", position=position_dodge())+
+  scale_fill_manual(values = Palette,
+                    labels = c("Young T1", "Peak T2", "Old T5"))+
+  scale_y_continuous((name = "Number of accepted mutations"),
+                     limits = c(0,70)) + 
+  scale_x_discrete(name = "MA line ID")+
+  theme_classic()+
+  theme(plot.title = element_text(hjust = 0.5, size = 15),
+        axis.title.x = element_text(size = 15),
+        axis.title.y = element_text(size = 15),
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size = 12),
+        axis.text.y = element_text(size = 12))+
+  labs(title = "Overlap",
+       tag = "C)")
+```
+
+```{r}
+pdf(file = "/Users/rnt500/My Drive/Nematode/Nematode_ASM164373v4_MS/Nematode_MS_v6/Figure_S5.pdf", width = 6, height = 12) # The size of the plot in inches
+
+grid.arrange(Figure_S5a, Figure_S5b, Figure_S5c, ncol = 1)
+
+dev.off()
+```
+
+# Figure S7
+
+Consensus approach
+
+```{r}
+Figure_7a_temp <- cbind(aggregate(TsTv_consensus_df$perc, 
+                            by = list(TsTv_consensus_df$Regime,
+                                      TsTv_consensus_df$TsTv), FUN = mean),
+                       aggregate(TsTv_consensus_df$perc, 
+                            by = list(TsTv_consensus_df$Regime,
+                                      TsTv_consensus_df$TsTv), FUN = se)[,3])
+colnames(Figure_7a_temp) <- c("Regime", "TsTv", "mean", "se")
+
+Regime <- c("T1", "T2", "T5")
+TsTv <- c("Transition", "Transversion", "Transition", "Transversion", "Transition", "Transversion")
+
+temp <- data.frame(rep(Regime, each = 2), TsTv)
+colnames(temp) <- c("Regime", "TsTv")
+
+Figure_7a <- merge(temp, Figure_7a_temp, 
+                  by.x = c("Regime", "TsTv"), by.y = c("Regime", "TsTv"), all = T)
+
+
+Figure_7a[is.na(Figure_7a)] <- 0
+
+Figure_7a$Regime <- as.factor(Figure_7a$Regime)
+Figure_7a$TsTv <- as.factor(Figure_7a$TsTv)
+
+Figure_S7a <-
+ggplot(Figure_7a, aes(x = TsTv, y = mean, fill = Regime))+
+  geom_bar(stat="identity", position=position_dodge())+
+  geom_errorbar(aes(ymin=mean-se, ymax=mean+se), width=.2,
+                 position=position_dodge(.9))+
+  scale_fill_manual(values = Palette,
+                    labels = c("Young T1", "Peak T2", "Old T5"))+
+  scale_y_continuous((name = "% of mutations"),
+                     breaks = c(0,0.2,0.4,0.6,0.8,1),
+                     labels = c("0","20","40","60","80","100"),
+                     limits = c(0,1)) + 
+  scale_x_discrete(name = "Category of mutations")+
+  theme_classic()+
+  theme(plot.title = element_text(hjust = 0.5, size = 15),
+        axis.title.x = element_text(size = 15),
+        axis.title.y = element_text(size = 15),
+        axis.text.x = element_text(size = 12),
+        axis.text.y = element_text(size = 12))+
+  labs(title = "Consensus approach",
+       tag = "A)")
+
+
+```
+
+Probabilistic approach
+
+```{r}
+Figure_7a_temp <- cbind(aggregate(TsTv_probabilistic_df$perc, 
+                            by = list(TsTv_probabilistic_df$Regime,
+                                      TsTv_probabilistic_df$TsTv), FUN = mean),
+                       aggregate(TsTv_probabilistic_df$perc, 
+                            by = list(TsTv_probabilistic_df$Regime,
+                                      TsTv_probabilistic_df$TsTv), FUN = se)[,3])
+colnames(Figure_7a_temp) <- c("Regime", "TsTv", "mean", "se")
+
+Regime <- c("T1", "T2", "T5")
+TsTv <- c("Transition", "Transversion", "Transition", "Transversion", "Transition", "Transversion")
+
+temp <- data.frame(rep(Regime, each = 2), TsTv)
+colnames(temp) <- c("Regime", "TsTv")
+
+Figure_7a <- merge(temp, Figure_7a_temp, 
+                  by.x = c("Regime", "TsTv"), by.y = c("Regime", "TsTv"), all = T)
+
+
+Figure_7a[is.na(Figure_7a)] <- 0
+
+Figure_7a$Regime <- as.factor(Figure_7a$Regime)
+Figure_7a$TsTv <- as.factor(Figure_7a$TsTv)
+
+Figure_S7b <-
+ggplot(Figure_7a, aes(x = TsTv, y = mean, fill = Regime))+
+  geom_bar(stat="identity", position=position_dodge())+
+  geom_errorbar(aes(ymin=mean-se, ymax=mean+se), width=.2,
+                 position=position_dodge(.9))+
+  scale_fill_manual(values = Palette,
+                    labels = c("Young T1", "Peak T2", "Old T5"))+
+  scale_y_continuous((name = "% of mutations"),
+                     breaks = c(0,0.2,0.4,0.6,0.8,1),
+                     labels = c("0","20","40","60","80","100"),
+                     limits = c(0,1)) + 
+  scale_x_discrete(name = "Category of mutations")+
+  theme_classic()+
+  theme(plot.title = element_text(hjust = 0.5, size = 15),
+        axis.title.x = element_text(size = 15),
+        axis.title.y = element_text(size = 15),
+        axis.text.x = element_text(size = 12),
+        axis.text.y = element_text(size = 12))+
+  labs(title = "Probabilistic approach",
+       tag = "B)")
+
+```
+
+```{r}
+
+
+pdf(file = "/Users/rnt500/My Drive/Nematode/Nematode_ASM164373v4_MS/Nematode_MS_v6/Figure_S7.pdf", width = 6, height = 8) # The size of the plot in inches
+
+grid.arrange(Figure_S7a, Figure_S7b, ncol = 1)
+
+dev.off()
+
+```
+
+# Table 1
+
+mean number of mutations
+
+```{r}
+format(cbind(aggregate(df$overlap, by = list(df$Regime), FUN = mean), aggregate(df$overlap, by = list(df$Regime), FUN = se)[,2]),
+       format = "e", digits = 2)
+
+```
+
+mean number of callable sites
+
+```{r}
+aggregate(df$Callability, by = list(df$Regime), FUN = mean)
+
+```
+
+mean mutation rate
+
+```{r}
+
+format(cbind(aggregate(df$mu_overlap, list(df$Regime), FUN = mean),
+              aggregate(df$mu_overlap, list(df$Regime), FUN = se)[,2]), 
+       format = "e", digits = 3)
+```
+
+mean number of transitions and transversions
+
+```{r}
+
+TsTv <- c("Transition", "Transition", "Transition", "Transition", "Transition", "Transition",
+          "Transition", "Transition", "Transition", "Transition", "Transition", "Transition",
+          "Transition", "Transition", "Transition", "Transition", "Transition", "Transition",
+          "Transversion", "Transversion", "Transversion", "Transversion", "Transversion", "Transversion",
+          "Transversion", "Transversion", "Transversion", "Transversion", "Transversion", "Transversion",
+          "Transversion", "Transversion", "Transversion", "Transversion", "Transversion", "Transversion")
+
+temp <- data.frame(rep(df[,c(1,2)], each = 2), TsTv)[,c(1,3,5)]
+colnames(temp) <- c("Sample", "Regime", "TsTv")
+
+TsTv_overlap_df2 <- merge(temp, TsTv_overlap_df, 
+                  by.x = c("Sample", "TsTv"), by.y = c("Sample", "TsTv"), all = T)[,c(1,2,3,5,6)]
+colnames(TsTv_overlap_df2) <- c("Sample", "TsTv", "Regime", "number", "total")
+TsTv_overlap_df2[is.na(TsTv_overlap_df2)] <- 0
+
+
+format(cbind(
+  aggregate(TsTv_overlap_df2$number, 
+            by = list(TsTv_overlap_df2$Regime, TsTv_overlap_df2$TsTv), 
+            FUN = mean),
+  aggregate(TsTv_overlap_df2$number, 
+            by = list(TsTv_overlap_df2$Regime, TsTv_overlap_df2$TsTv), 
+            FUN = se)[,3]),
+        format = "e", digits = 2) 
+```
+
+# Table S1
+
+```{r}
+
+Table_S1 <- merge(coverage, callability, by = "Sample", all = T)
+Table_S1$Percentage <- Table_S1$Callability/124491291
+
+mean(Table_S1$Percentage)
+
+aggregate(Table_S1$Percentage, by = list(Table_S1$Regime), FUN = mean)
+```
+
+# Table S2
+
+```{r}
+singleton_count_all <- spread(aggregate(singleton_raw$Sample, by = list(singleton_raw$Sample, singleton_raw$approach), FUN = NROW), Group.2, x)
+colnames(singleton_count_all) <- c("Sample", "consensus_all", "probabilistic_all")
+
+singleton_count_PASS <- spread(singleton_PASS, approach, total_count)
+colnames(singleton_count_PASS) <- c("Regime", "Sample", "consensus_PASS", "probabilistic_PASS")
+singleton_count_PASS[is.na(singleton_count_PASS)] <- 0
+
+Table_S2 <- merge(singleton_count_PASS, singleton_count_all, by = "Sample", all = T)
+Table_S2$consensus_perc <- percent(Table_S2$consensus_PASS/Table_S2$consensus_all)
+Table_S2$probabilistic_perc <- percent(Table_S2$probabilistic_PASS/Table_S2$probabilistic_all)
+
+Table_S2 <- merge(Table_S2, singleton_PASS_overlap[,c(2,3)], by = "Sample", all = T)
+Table_S2[is.na(Table_S2)] <- 0
+
+Table_S2 <- Table_S2[,c(2,1,5,3,7,6,4,8,9)]
+
+sum(Table_S2$consensus_all)
+sum(Table_S2$consensus_PASS)
+sum(Table_S2$probabilistic_all)
+sum(Table_S2$probabilistic_PASS)
+sum(Table_S2$overlap)
+
+percent(mean(Table_S2$consensus_PASS/Table_S2$consensus_all))
+percent(mean(Table_S2$probabilistic_PASS/Table_S2$probabilistic_all))
+
+```
+
+```{r}
+aggregate(Table_S2$overlap, by = list(Table_S2$Regime), FUN = sum)
+
+cbind(aggregate(Table_S2$overlap, by = list(Table_S2$Regime), FUN = mean),
+aggregate(Table_S2$overlap, by = list(Table_S2$Regime), FUN = se)[,2])
+
+```
+
+# Table S3
+
+mean number of mutations
+
+```{r}
+format(cbind(aggregate(df$consensus, by = list(df$Regime), FUN = mean), aggregate(df$consensus, by = list(df$Regime), FUN = se)[,2]),
+       format = "e", digits = 3)
+
+format(cbind(aggregate(df$probabilistic, by = list(df$Regime), FUN = mean), aggregate(df$probabilistic, by = list(df$Regime), FUN = se)[,2]),
+       format = "e", digits = 3)
+
+```
+
+mean number of callable sites
+
+```{r}
+aggregate(df$Callability, by = list(df$Regime), FUN = mean)
+
+```
+
+mean mutation rate
+
+```{r}
+
+format(cbind(aggregate(df$mu_consensus, list(df$Regime), FUN = mean),
+              aggregate(df$mu_consensus, list(df$Regime), FUN = se)[,2]), 
+       format = "e", digits = 4)
+
+
+format(cbind(aggregate(df$mu_probabilistic, list(df$Regime), FUN = mean),
+              aggregate(df$mu_probabilistic, list(df$Regime), FUN = se)[,2]), 
+       format = "e", digits = 4)
+```
+
+mean number of transitions and transversions
+
+```{r}
+
+
+
+TsTv <- c("Transition", "Transition", "Transition", "Transition", "Transition", "Transition",
+          "Transition", "Transition", "Transition", "Transition", "Transition", "Transition",
+          "Transition", "Transition", "Transition", "Transition", "Transition", "Transition",
+          "Transversion", "Transversion", "Transversion", "Transversion", "Transversion", "Transversion",
+          "Transversion", "Transversion", "Transversion", "Transversion", "Transversion", "Transversion",
+          "Transversion", "Transversion", "Transversion", "Transversion", "Transversion", "Transversion")
+
+temp <- data.frame(rep(df[,c(1,2)], each = 2), TsTv)[,c(1,3,5)]
+colnames(temp) <- c("Sample", "Regime", "TsTv")
+
+TsTv_consensus_df2 <- merge(temp, TsTv_consensus_df, 
+                  by.x = c("Sample", "TsTv"), by.y = c("Sample", "TsTv"), all = T)[,c(1,2,3,5,6)]
+colnames(TsTv_consensus_df2) <- c("Sample", "TsTv", "Regime", "number", "total")
+TsTv_consensus_df2[is.na(TsTv_consensus_df2)] <- 0
+
+
+format(cbind(
+  aggregate(TsTv_consensus_df2$number, 
+            by = list(TsTv_consensus_df2$Regime, TsTv_consensus_df2$TsTv), 
+            FUN = mean),
+  aggregate(TsTv_consensus_df2$number, 
+            by = list(TsTv_consensus_df2$Regime, TsTv_consensus_df2$TsTv), 
+            FUN = se)[,3]),
+        format = "e", digits = 2) 
+```
+
+```{r}
+aggregate(TsTv_consensus$Sample, 
+            by = list(TsTv_consensus$Sample, TsTv_consensus$TsTv), 
+            FUN = NROW)
+```
+
+```{r}
+TsTv <- c("Transition", "Transition", "Transition", "Transition", "Transition", "Transition",
+          "Transition", "Transition", "Transition", "Transition", "Transition", "Transition",
+          "Transition", "Transition", "Transition", "Transition", "Transition", "Transition",
+          "Transversion", "Transversion", "Transversion", "Transversion", "Transversion", "Transversion",
+          "Transversion", "Transversion", "Transversion", "Transversion", "Transversion", "Transversion",
+          "Transversion", "Transversion", "Transversion", "Transversion", "Transversion", "Transversion")
+
+temp <- data.frame(rep(df[,c(1,2)], each = 2), TsTv)[,c(1,3,5)]
+colnames(temp) <- c("Sample", "Regime", "TsTv")
+
+TsTv_probabilistic_TsTv_df <- merge(temp, TsTv_probabilistic_TsTv, 
+                  by.x = c("Sample", "TsTv"), by.y = c("Sample", "TsTv"), all = T)[,c(1,2,3,5,6)]
+colnames(TsTv_probabilistic_TsTv_df) <- c("Sample", "TsTv", "Regime", "number", "total")
+TsTv_probabilistic_TsTv_df[is.na(TsTv_probabilistic_TsTv_df)] <- 0
+
+
+TsTv_probabilistic_TsTv_df[is.na(TsTv_probabilistic_TsTv_df)] <- 0
+
+format(cbind(
+  aggregate(TsTv_probabilistic_TsTv_df$number, 
+            by = list(TsTv_probabilistic_TsTv_df$Regime, TsTv_probabilistic_TsTv_df$TsTv), 
+            FUN = mean),
+  aggregate(TsTv_probabilistic_TsTv_df$number, 
+            by = list(TsTv_probabilistic_TsTv_df$Regime, TsTv_probabilistic_TsTv_df$TsTv), 
+            FUN = se)[,3]),
+        format = "e", digits = 2) 
+```
+
+# Table S4
+
+```{r}
+format(df[,c(1,7,8,9)], format = "e", digits = 4)[,c(1,3,2,4)]
+```
+
+# Table S5
+
+```{r}
+
+reshape(TsTv_consensus_df[,c(1,3,4)], idvar = "Sample", timevar = "TsTv", direction = "wide")
+
+reshape(TsTv_probabilistic_df[,c(1,3,4)], idvar = "Sample", timevar = "TsTv", direction = "wide")
+
+reshape(TsTv_overlap_df[,c(1,3,4)], idvar = "Sample", timevar = "TsTv", direction = "wide")
+
+```
+
+# Supplementary Results
+
+## Overview
+
+general description
+
+```{r}
+aggregate(singleton_raw$Sample, by = list(singleton_raw$approach), FUN = NROW)
+
+aggregate(singleton_raw$Sample, by = list(singleton_raw$Regime, singleton_raw$approach), FUN = NROW)
+```
+
+```{r}
+cbind(aggregate(singleton_count_PASS$consensus_PASS, by = list(singleton_count_PASS$Regime), FUN = sum),aggregate(singleton_count_PASS$probabilistic_PASS, by = list(singleton_count_PASS$Regime), FUN = sum)[,2])
+
+cbind(aggregate(singleton_count_PASS$consensus_PASS, by = list(singleton_count_PASS$Regime), FUN = mean),aggregate(singleton_count_PASS$consensus_PASS, by = list(singleton_count_PASS$Regime), FUN = se)[,2])
+
+cbind(aggregate(singleton_count_PASS$probabilistic_PASS, by = list(singleton_count_PASS$Regime), FUN = mean),aggregate(singleton_count_PASS$probabilistic_PASS, by = list(singleton_count_PASS$Regime), FUN = se)[,2])
+
+```
+
+derive acceptance rate
+
+```{r}
+
+percent(min(Table_S2$consensus_PASS/Table_S2$consensus_all))
+percent(max(Table_S2$consensus_PASS/Table_S2$consensus_all))
+
+percent(min(Table_S2$probabilistic_PASS/Table_S2$probabilistic_all))
+percent(max(Table_S2$probabilistic_PASS/Table_S2$probabilistic_all))
+
+cbind(aggregate(Table_S2$consensus_PASS/Table_S2$consensus_all, by = list(Table_S2$Regime), FUN = mean),
+aggregate(Table_S2$consensus_PASS/Table_S2$consensus_all, by = list(Table_S2$Regime), FUN = se)[,2])
+
+
+cbind(aggregate(Table_S2$probabilistic_PASS/Table_S2$probabilistic_all, by = list(Table_S2$Regime), FUN = mean),
+aggregate(Table_S2$probabilistic_PASS/Table_S2$probabilistic_all, by = list(Table_S2$Regime), FUN = se)[,2])
+
+#Table_S2$consensus_perc <- percent(Table_S2$consensus_PASS/Table_S2$consensus_all)
+#Table_S2$probabilistic_perc <- percent(Table_S2$probabilistic_PASS/Table_S2$probabilistic_all)
+```
+
+test whether acceptance rate differs between regimes: consensus approach
+
+```{r}
+
+Table_S2_chisq_test <- subset(Table_S2, select = c("Regime"))
+Table_S2_chisq_test$consensus_perc_2 <- Table_S2$consensus_PASS/Table_S2$consensus_all
+Table_S2_chisq_test$probabilistic_perc_2 <- Table_S2$probabilistic_PASS/Table_S2$probabilistic_all
+
+Table_S2_chisq_test_consensus <- aggregate(Table_S2_chisq_test$consensus_perc_2, by = list(Table_S2_chisq_test$Regime), FUN = mean)
+
+chisq.test(Table_S2_chisq_test_consensus$x)
+```
+
+test whether acceptance rate differs between regimes: probabilistic approach
+
+```{r}
+Table_S2_chisq_test <- subset(Table_S2, select = c("Regime"))
+Table_S2_chisq_test$probabilistic_perc_2 <- Table_S2$probabilistic_PASS/Table_S2$probabilistic_all
+Table_S2_chisq_test$probabilistic_perc_2 <- Table_S2$probabilistic_PASS/Table_S2$probabilistic_all
+
+Table_S2_chisq_test_probabilistic <- aggregate(Table_S2_chisq_test$probabilistic_perc_2, by = list(Table_S2_chisq_test$Regime), FUN = mean)
+
+chisq.test(Table_S2_chisq_test_probabilistic$x)
+
+```
+
+correlation
+
+```{r}
+
+cor.test(df$Callability, df$consensus, method = 'pearson')
+
+cor.test(df$Callability, df$probabilistic, method = 'pearson')
+
+```
+
+## parental-age-at-reproduction and mutation rates
+
+```{r}
+
+min(df$mu_consensus)
+max(df$mu_consensus)
+
+min(df$mu_probabilistic)
+max(df$mu_probabilistic)
+
+
+temp <- df[,c(1,2,7,8,9)]
+
+cbind(aggregate(temp$mu_consensus, by = list(temp$Regime), FUN = mean),
+aggregate(temp$mu_consensus, by = list(temp$Regime), FUN = se)[,2])
+
+cbind(aggregate(temp$mu_probabilistic, by = list(temp$Regime), FUN = mean),
+aggregate(temp$mu_probabilistic, by = list(temp$Regime), FUN = se)[,2])
+```
